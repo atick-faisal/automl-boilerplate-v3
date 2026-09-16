@@ -20,6 +20,9 @@ flaml = [
 autogluon = [
     "autogluon-tabular[catboost,lightgbm,xgboost]>=1.6,<1.7",
 ]
+mlflow = [
+    "mlflow-skinny>=3.16,<4",
+]
 
 [build-system]
 requires = ["uv_build>=0.12.13,<0.13.0"]
@@ -27,6 +30,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "mlflow>=3.16,<4",
     "pandas-stubs>=2.3,<2.4",
     "pyright>=1.1.414",
     "pytest>=9.1.1",

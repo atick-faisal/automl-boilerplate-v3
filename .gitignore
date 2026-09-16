@@ -13,3 +13,8 @@ wheels/
 AutogluonModels/
 catboost_info/
 flaml.log
+
+# MLflow local stores
+mlflow.db
+mlruns/
+mlartifacts/
