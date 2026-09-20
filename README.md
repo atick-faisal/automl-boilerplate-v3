@@ -57,6 +57,14 @@ restored = FlamlRegressor.load(logger.download_model(version, Path("downloads"))
 predictions = restored.predict(x_val)
 ```
 
+A runnable version of the same workflow — with logging, a predictions table and a check that the
+registered model predicts exactly like the one in memory — lives in `examples/train_and_register.py`:
+
+```bash
+uv run python examples/train_and_register.py                                   # FLAML, 30s budget
+uv run python examples/train_and_register.py --engine autogluon --time-budget 120
+```
+
 To use AutoGluon instead, swap the regressor for `AutoGluonRegressor(AutoGluonConfig(...))` from
 `automl_boilerplate_v3.autogluon_regressor`. Nothing else changes.
 
@@ -167,9 +175,12 @@ src/automl_boilerplate_v3/
 ├── autogluon_regressor.py   # AutoGluon adapter
 ├── experiment_logger.py     # ExperimentLogger interface, ModelVersion
 └── mlflow_logger.py         # MLflow adapter
+examples/
+└── train_and_register.py    # the whole workflow, runnable
 tests/
 ├── test_contract.py         # AutoMLRegressor contract
-└── test_experiment_logger.py
+├── test_experiment_logger.py
+└── test_example.py          # runs the example end to end
 ```
 
 ## Development

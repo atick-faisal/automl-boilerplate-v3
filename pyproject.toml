@@ -38,7 +38,7 @@ dev = [
 ]
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests", "examples"]
 typeCheckingMode = "strict"
 # None of sklearn, AutoGluon or FLAML ship stubs; untyped values are handled in the adapter modules.
 reportMissingTypeStubs = false
