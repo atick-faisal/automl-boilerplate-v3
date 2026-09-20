@@ -60,6 +60,25 @@ predictions = restored.predict(x_val)
 To use AutoGluon instead, swap the regressor for `AutoGluonRegressor(AutoGluonConfig(...))` from
 `automl_boilerplate_v3.autogluon_regressor`. Nothing else changes.
 
+### Choosing which models get trained
+
+Each engine's config names the models it will search over. This one setting is deliberately not
+shared between engines: FLAML tunes individual **learners**, AutoGluon trains model **families**
+and stacks an ensemble on top, so each config uses its own engine's vocabulary.
+
+```python
+FlamlConfig(estimator_list=("lgbm", "catboost", "enet"))  # None lets FLAML choose
+AutoGluonConfig(included_model_types=("GBM", "CAT", "XGB"))  # None leaves it to `presets`
+```
+
+Every valid name is listed, with a note on what it is, in the `FlamlEstimator` and
+`AutoGluonModelType` types next to each config — so your editor offers them and a typo is a
+type error rather than a wasted training run.
+
+One AutoGluon quirk worth knowing: `included_model_types` **filters** the preset's model list
+rather than replacing it, and the weighted ensemble is stacked on afterwards regardless. A run
+restricted to `("GBM",)` still ends with a `WeightedEnsemble_L2` row in the leaderboard.
+
 ### The saved model
 
 `save` writes **one file**, so the path you pass is the artifact — nothing is scattered into a

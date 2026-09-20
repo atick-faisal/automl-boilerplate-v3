@@ -217,7 +217,11 @@ def _autogluon() -> AnyRegressor:
     pytest.importorskip("autogluon.tabular")
     from automl_boilerplate_v3.autogluon_regressor import AutoGluonConfig, AutoGluonRegressor
 
-    return AutoGluonRegressor(AutoGluonConfig(time_limit_s=20, presets="medium_quality"))
+    # Pinned to two fast families so the run is deterministic inside the time limit, and so the
+    # whole adapter contract below is exercised against a filtered search.
+    return AutoGluonRegressor(
+        AutoGluonConfig(time_limit_s=20, presets="medium_quality", included_model_types=("GBM", "XGB"))
+    )
 
 
 @pytest.fixture(scope="module", params=[_flaml, _autogluon], ids=["flaml", "autogluon"])

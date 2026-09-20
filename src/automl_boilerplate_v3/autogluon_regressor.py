@@ -8,7 +8,7 @@ from __future__ import annotations
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import override
+from typing import Literal, override
 
 import numpy as np
 import pandas as pd
@@ -22,6 +22,48 @@ _PREDICTOR_DIR = "predictor"
 # clashing with however the caller named their target.
 _LABEL = "__target__"
 
+#: Every model family AutoGluon can train for regression, spelled as `included_model_types`
+#: accepts it. Taken from `autogluon.tabular.registry.ag_model_registry`, minus the keys
+#: AutoGluon manages itself (the weighted ensembles, "DUMMY") and the multimodal ones
+#: ("AG_AUTOMM", "AG_IMAGE_NN", "AG_TEXT_NN"), which need installs this package does not pull in.
+type AutoGluonModelType = Literal[
+    # Gradient-boosted trees and forests: fast, and what the default presets lean on.
+    "GBM",  # LightGBM
+    "GBM_PREP",  # LightGBM with AutoGluon's extra feature preprocessing
+    "CAT",  # CatBoost
+    "XGB",  # XGBoost
+    "RF",  # Random forest
+    "XT",  # Extremely randomised trees
+    # Simple baselines, cheap enough to always be worth a leaderboard row.
+    "KNN",  # k-nearest neighbours
+    "LR",  # Linear regression
+    # Neural networks: slower, and the ones that benefit most from a GPU.
+    "NN_TORCH",  # AutoGluon's own PyTorch tabular network
+    "FASTAI",  # fast.ai tabular network
+    "REALMLP",  # RealMLP
+    "TABM",  # TabM
+    "FT_TRANSFORMER",  # FT-Transformer
+    # Interpretable models: you trade accuracy for a model you can read.
+    "EBM",  # Explainable boosting machine
+    "IM_RULEFIT",  # RuleFit
+    "IM_FIGS",  # Fast interpretable greedy-tree sums
+    "IM_GREEDYTREE",  # Greedy tree
+    "IM_HSTREE",  # Hierarchical shrinkage tree
+    "IM_BOOSTEDRULES",  # Boosted rule set
+    # Pretrained tabular foundation models: large downloads, and they want a GPU. Only the
+    # strongest presets reach for these, so naming one here is how you opt in deliberately.
+    "TABPFN-2.6",
+    "TABPFN-3",
+    "TABPFNMIX",
+    "REALTABPFN-V2",
+    "REALTABPFN-V2.5",
+    "TABICL",
+    "TABDPT",
+    "TABDPT-TURBO",
+    "MITRA",
+    "NORI",
+]
+
 
 @dataclass(frozen=True, slots=True)
 class AutoGluonConfig:
@@ -31,6 +73,8 @@ class AutoGluonConfig:
         time_limit_s: Wall-clock seconds for training; ``None`` means no limit.
         presets: Quality/speed trade-off, e.g. ``"medium_quality"``, ``"best_quality"``.
         eval_metric: Metric AutoGluon optimizes, e.g. ``"root_mean_squared_error"``.
+        included_model_types: Model families to train, e.g. ``("GBM", "CAT", "XGB")``;
+            `AutoGluonModelType` lists every option. ``None`` leaves the choice to ``presets``.
         verbosity: AutoGluon log level from 0 (silent) to 4.
         work_dir: Where AutoGluon writes models while training. ``None`` uses a temporary
             directory that is removed with this object; call `save` to keep the model.
@@ -39,6 +83,7 @@ class AutoGluonConfig:
     time_limit_s: float | None = 300
     presets: str = "medium_quality"
     eval_metric: str = "root_mean_squared_error"
+    included_model_types: tuple[AutoGluonModelType, ...] | None = None
     verbosity: int = 0
     work_dir: Path | None = None
 
@@ -72,6 +117,12 @@ class AutoGluonRegressor(AutoMLRegressor[AutoGluonConfig]):
             # AutoGluon annotates `time_limit: float = None`; None (no limit) is its documented default.
             time_limit=self.config.time_limit_s,  # pyright: ignore[reportArgumentType]
             presets=self.config.presets,
+            # A filter over the preset's own model list, not a replacement for it, and the
+            # weighted ensemble is stacked on afterwards either way: a run restricted to
+            # ("GBM",) still finishes with a `WeightedEnsemble_L2` row in the leaderboard.
+            included_model_types=(
+                None if self.config.included_model_types is None else list(self.config.included_model_types)
+            ),
         )
         self._predictor = predictor
 

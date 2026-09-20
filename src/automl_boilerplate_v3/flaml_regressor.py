@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast, override
+from typing import Literal, cast, override
 
 import numpy as np
 import numpy.typing as npt
@@ -19,6 +19,23 @@ from automl_boilerplate_v3.base import AutoMLRegressor, FloatArray
 
 _MODEL_FILE = "automl.pkl"
 
+#: Every learner FLAML can tune for a regression task, spelled as `estimator_list` accepts it.
+#: Taken from FLAML's own registry (`flaml.automl.task.generic_task`), minus the classifier-only
+#: entries ("lrl1", "lrl2", "svc") and the Spark variants, which a pandas frame cannot use.
+type FlamlEstimator = Literal[
+    "lgbm",  # LightGBM; FLAML's first choice and a strong default on most tabular data
+    "xgboost",  # XGBoost
+    "xgb_limitdepth",  # XGBoost with a bounded tree depth: cheaper, and less prone to overfitting
+    "rf",  # Random forest
+    "extra_tree",  # Extremely randomised trees
+    "catboost",  # CatBoost; needs the `catboost` package, which the `flaml` extra installs
+    "histgb",  # scikit-learn's HistGradientBoostingRegressor
+    "kneighbor",  # k-nearest neighbours
+    "sgd",  # Linear model fit by SGD; scale your features first or it will not converge
+    "enet",  # Elastic net: a fast linear baseline worth having in the leaderboard
+    "lassolars",  # Lasso fit by least-angle regression
+]
+
 
 @dataclass(frozen=True, slots=True)
 class FlamlConfig:
@@ -27,14 +44,15 @@ class FlamlConfig:
     Attributes:
         time_budget_s: Wall-clock seconds for the whole search.
         metric: Metric FLAML optimizes, e.g. ``"rmse"``, ``"mae"``, ``"r2"``.
-        estimator_list: Learners to try, e.g. ``("lgbm", "xgboost")``. ``None`` lets FLAML choose.
+        estimator_list: Learners to search over, e.g. ``("lgbm", "xgboost")``; `FlamlEstimator`
+            lists every option. ``None`` lets FLAML pick the list itself.
         seed: Random seed for reproducible searches.
         verbose: FLAML log level; 0 is silent.
     """
 
     time_budget_s: float = 60
     metric: str = "rmse"
-    estimator_list: tuple[str, ...] | None = None
+    estimator_list: tuple[FlamlEstimator, ...] | None = None
     seed: int = 0
     verbose: int = 0
 
