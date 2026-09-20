@@ -77,6 +77,22 @@ class FlamlRegressor(AutoMLRegressor[FlamlConfig]):
     def _load(self, path: Path) -> None:
         self._automl = AutoML.load_pickle(str(path / _MODEL_FILE))
 
+    @override
+    def _leaderboard(self) -> pd.DataFrame:
+        automl = self._require_automl()
+        # FLAML keeps the best configuration per learner, which is the granularity worth ranking.
+        # A learner that never completed a trial is reported as `inf`, and sorts last.
+        losses = cast(dict[str, float], automl.best_loss_per_estimator)
+        best = cast(str, automl.best_estimator)
+        return pd.DataFrame(
+            {
+                "model": list(losses),
+                "loss": [float(loss) for loss in losses.values()],
+                "metric": [self.config.metric] * len(losses),
+                "is_best": [name == best for name in losses],
+            }
+        )
+
     def _require_automl(self) -> AutoML:
         if self._automl is None:
             raise NotFittedError("FlamlRegressor is not fitted")

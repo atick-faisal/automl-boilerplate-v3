@@ -6,10 +6,12 @@ against a throwaway SQLite store, which needs the full `mlflow` package from the
 
 from __future__ import annotations
 
+import io
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, override
 
+import pandas as pd
 import pytest
 
 from automl_boilerplate_v3 import ExperimentLogger, ModelVersion, ParamValue
@@ -30,6 +32,7 @@ class _Run:
     failed: bool | None = None
     params: dict[str, ParamValue] = field(default_factory=dict[str, ParamValue])
     artifacts: dict[str, Path] = field(default_factory=dict[str, Path])
+    contents: dict[str, str] = field(default_factory=dict[str, str])
 
 
 class _RecordingLogger(ExperimentLogger[_NoConfig]):
@@ -60,6 +63,9 @@ class _RecordingLogger(ExperimentLogger[_NoConfig]):
     @override
     def _log_artifact(self, run_id: str, path: Path, name: str) -> None:
         self.runs[run_id].artifacts[name] = path
+        if path.is_file():
+            # Snapshot now: `log_table` stages its CSV in a temp directory that is gone on return.
+            self.runs[run_id].contents[name] = path.read_text()
 
     @override
     def _register_model(self, run_id: str, model_name: str, artifact_name: str) -> ModelVersion:
@@ -107,14 +113,22 @@ def test_log_artifact_defaults_name_to_file_name(tmp_path: Path) -> None:
     assert logger.runs["run-0"].artifacts == {"report.txt": file}
 
 
-def test_log_model_rejects_missing_or_file_path(tmp_path: Path) -> None:
-    file = tmp_path / "model.pkl"
-    file.write_text("not a directory")
+def test_log_model_rejects_missing_or_directory_path(tmp_path: Path) -> None:
     with _RecordingLogger().start_run() as logger:
-        with pytest.raises(NotADirectoryError):
-            logger.log_model(tmp_path / "missing")
-        with pytest.raises(NotADirectoryError):
-            logger.log_model(file)
+        with pytest.raises(FileNotFoundError):
+            logger.log_model(tmp_path / "missing.zip")
+        with pytest.raises(IsADirectoryError):
+            logger.log_model(tmp_path)
+
+
+def test_log_table_stages_a_csv_under_the_given_name() -> None:
+    table = pd.DataFrame({"model": ["lgbm", "rf"], "loss": [0.1, 0.25]})
+    with _RecordingLogger().start_run() as logger:
+        logger.log_table(table, "reports/leaderboard.csv")
+
+    # Reading it back also proves the index was not written as a stray column.
+    csv = logger.runs["run-0"].contents["reports/leaderboard.csv"]
+    pd.testing.assert_frame_equal(pd.read_csv(io.StringIO(csv)), table)
 
 
 # -------------------------------------------------------------------- mlflow
@@ -169,18 +183,16 @@ def test_mlflow_logs_file_under_custom_name(mlflow_logger: MlflowLogger, tmp_pat
 
 
 def test_mlflow_model_register_download_round_trip(mlflow_logger: MlflowLogger, tmp_path: Path) -> None:
-    model_dir = tmp_path / "saved"
-    (model_dir / "predictor").mkdir(parents=True)
-    (model_dir / "metadata.json").write_text("{}")
-    (model_dir / "predictor" / "weights.bin").write_bytes(b"\x00\x01")
+    model_file = tmp_path / "model.zip"
+    model_file.write_bytes(b"PK\x03\x04 pretend archive")
 
     with mlflow_logger.start_run() as run:
-        run.log_model(model_dir)
+        run.log_model(model_file)
         first = run.register_model("price-regressor")
         second = run.register_model("price-regressor")
 
     assert (first, second) == (ModelVersion("price-regressor", "1"), ModelVersion("price-regressor", "2"))
 
     downloaded = mlflow_logger.download_model(second, tmp_path / "download")
-    assert (downloaded / "metadata.json").read_text() == "{}"
-    assert (downloaded / "predictor" / "weights.bin").read_bytes() == b"\x00\x01"
+    assert downloaded.is_file()
+    assert downloaded.read_bytes() == b"PK\x03\x04 pretend archive"

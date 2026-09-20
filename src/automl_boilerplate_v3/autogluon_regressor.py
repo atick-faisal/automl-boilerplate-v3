@@ -81,11 +81,34 @@ class AutoGluonRegressor(AutoMLRegressor[AutoGluonConfig]):
 
     @override
     def _save(self, path: Path) -> None:
-        self._require_predictor().clone(str(path / _PREDICTOR_DIR), dirs_exist_ok=True)
+        # `clone_for_deployment`, not `clone`: it keeps the winning model and deletes every other
+        # candidate, the bagged folds and the copy of the training data. The clone can only
+        # predict, which is all a saved model has to do.
+        self._require_predictor().clone_for_deployment(str(path / _PREDICTOR_DIR), model="best", dirs_exist_ok=True)
 
     @override
     def _load(self, path: Path) -> None:
         self._predictor = TabularPredictor.load(str(path / _PREDICTOR_DIR), verbosity=self.config.verbosity)
+
+    @override
+    def _leaderboard(self) -> pd.DataFrame:
+        # Read at fit time on purpose: `_save` prunes the predictor with `clone_for_deployment`,
+        # which deletes the losing models and this table along with them.
+        predictor = self._require_predictor()
+        board = predictor.leaderboard()
+        best = predictor.model_best
+        return pd.DataFrame(
+            {
+                "model": board["model"],
+                # AutoGluon always reports higher-is-better, flipping the sign of error metrics.
+                # Flip it back so the column is a loss like every other adapter's.
+                "loss": -board["score_val"],
+                "metric": board["eval_metric"],
+                "is_best": board["model"] == best,
+                "fit_time_s": board["fit_time"],
+                "predict_time_s": board["pred_time_val"],
+            }
+        )
 
     def _training_dir(self) -> Path:
         if self.config.work_dir is not None:

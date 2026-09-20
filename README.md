@@ -48,8 +48,9 @@ logger = MlflowLogger(MlflowConfig(experiment_name="california-housing", trackin
 with logger.start_run("flaml-baseline") as run:
     run.log_params(regressor.params)
     run.log_metrics(regressor.validate(x_val, y_val).to_dict(prefix="val_"))
-    regressor.save(Path("model"))
-    run.log_model(Path("model"))
+    run.log_table(regressor.leaderboard(), "leaderboard.csv")  # how every candidate scored
+    regressor.save(Path("model.zip"))  # one file, best model only
+    run.log_model(Path("model.zip"))
     version = run.register_model("california-housing")
 
 restored = FlamlRegressor.load(logger.download_model(version, Path("downloads")))
@@ -58,6 +59,38 @@ predictions = restored.predict(x_val)
 
 To use AutoGluon instead, swap the regressor for `AutoGluonRegressor(AutoGluonConfig(...))` from
 `automl_boilerplate_v3.autogluon_regressor`. Nothing else changes.
+
+### The saved model
+
+`save` writes **one file**, so the path you pass is the artifact — nothing is scattered into a
+directory you did not expect. It is a zip archive, which keeps it inspectable:
+
+```text
+model.zip
+├── metadata.json      # adapter, library version, feature names, target name, params
+├── config.pkl         # the frozen config dataclass
+├── leaderboard.csv    # one row per candidate model — performance only, no weights
+└── payload/           # the framework's own files, pruned to the best model
+```
+
+```bash
+unzip -l model.zip                      # what is in there
+unzip -p model.zip leaderboard.csv      # how the candidates scored, without Python
+```
+
+Only the winning model's weights are kept. For AutoGluon that is the difference between copying
+every trained model, every bagged fold and the training data, and copying one:
+
+| | files | size |
+| --- | --- | --- |
+| full predictor directory | 25 | 24.1 MiB |
+| `model.zip` | 1 | 2.5 MiB |
+
+The losing candidates are not lost, just reduced to their numbers. `leaderboard()` returns them as
+a dataframe — `model`, `loss` (lower is better), `metric` and `is_best`, plus adapter extras such as
+AutoGluon's `fit_time_s` — sorted best first. It is captured during `fit`, because pruning a search
+down to its winner destroys the framework's record of the rest, and it travels inside the archive,
+so it survives a `load` too.
 
 ### Choosing an MLflow backend
 
@@ -73,18 +106,20 @@ To use AutoGluon instead, swap the regressor for `AutoGluonRegressor(AutoGluonCo
 - `fit` rejects empty data, non-string column names, misaligned indexes and NaN targets.
 - `predict` matches columns by name, ignores extra columns, and keeps the input index and target name.
 - `validate` returns RMSE, MAE and R², computed the same way for every adapter.
-- `save` writes a self-contained directory. `load` refuses a directory saved by a different adapter and warns when
-  the framework version changed.
+- `save` writes one self-contained file holding only the best model. `load` refuses a file saved by a different
+  adapter and warns when the framework version changed.
+- `leaderboard` ranks every candidate the search tried, and round-trips through `save` without losing precision.
 - `params` flattens the config into primitives that any tracker accepts.
 
 **`ExperimentLogger`**
 
 - One active run per logger. Used as a context manager, the run is marked `FAILED` if the block raises.
 - Logging without an active run raises `RuntimeError` instead of silently creating one.
+- `log_table` uploads a dataframe as a CSV artifact, without the index.
 - `register_model` creates the registered model on first use and returns a `ModelVersion`.
 - `download_model` doesn't need an active run.
 
-> **Security:** `AutoMLRegressor.load` uses pickle. Only load models you trust.
+> **Security:** `AutoMLRegressor.load` unpacks an archive and uses pickle. Only load model files you trust.
 
 ## Adding an adapter
 
@@ -98,6 +133,11 @@ adapter only implements the private hooks:
 
 Each adapter takes a frozen dataclass as its config. See `flaml_regressor.py` and `mlflow_logger.py` for short
 examples.
+
+`AutoMLRegressor._leaderboard` is the one **optional** hook: return a frame with `model`, `loss`, `metric` and
+`is_best` columns to have the base class normalise, sort and persist it. Adapters that train a single model can
+leave it alone. `_save` and `_load` still receive a directory — a temporary one the base class packs into the
+archive — so an adapter never deals with the file format itself.
 
 ## Project layout
 

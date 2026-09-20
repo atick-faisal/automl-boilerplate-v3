@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import TracebackType
 from typing import TYPE_CHECKING, Self, final
+
+import pandas as pd
 
 from automl_boilerplate_v3.base import ParamValue
 
@@ -154,19 +157,35 @@ class ExperimentLogger[ConfigT: DataclassInstance](ABC):
         logger.info("Logged artifact %s to run %s", path, self.run_id)
 
     @final
-    def log_model(self, model_dir: Path, name: str = _DEFAULT_MODEL_NAME) -> None:
-        """Upload a model directory, e.g. one written by `AutoMLRegressor.save`, so it can be registered.
+    def log_table(self, table: pd.DataFrame, name: str) -> None:
+        """Upload a dataframe as a CSV artifact, e.g. `AutoMLRegressor.leaderboard`.
 
         Args:
-            model_dir: Existing directory holding the model.
+            table: Rows to upload; the index is not written.
+            name: Where it is stored inside the run, e.g. ``"leaderboard.csv"``.
+        """
+        run_id = self.run_id
+        with tempfile.TemporaryDirectory() as staging:
+            staged = Path(staging) / PurePosixPath(name).name
+            table.to_csv(staged, index=False)
+            self._log_artifact(run_id, staged, name)
+        logger.info("Logged table %s (%d rows) to run %s", name, len(table), run_id)
+
+    @final
+    def log_model(self, model_file: Path, name: str = _DEFAULT_MODEL_NAME) -> None:
+        """Upload the file written by `AutoMLRegressor.save`, so it can be registered.
+
+        Args:
+            model_file: Existing file holding the model.
             name: Where it is stored inside the run; pass the same value to `register_model`.
 
         Raises:
-            NotADirectoryError: If ``model_dir`` is not an existing directory.
+            FileNotFoundError: If ``model_file`` does not exist.
+            IsADirectoryError: If ``model_file`` is a directory.
         """
-        if not model_dir.is_dir():
-            raise NotADirectoryError(model_dir)
-        self.log_artifact(model_dir, name)
+        if model_file.is_dir():
+            raise IsADirectoryError(f"{model_file} is a directory; AutoMLRegressor.save writes a single file")
+        self.log_artifact(model_file, name)
 
     # ------------------------------------------------------------------ registry
 

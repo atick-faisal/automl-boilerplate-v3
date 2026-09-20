@@ -8,9 +8,12 @@ in this module, so swapping frameworks never changes calling code.
 from __future__ import annotations
 
 import dataclasses
+import io
 import json
 import logging
 import pickle
+import tempfile
+import zipfile
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from importlib import metadata
@@ -32,7 +35,17 @@ type FloatArray = npt.NDArray[np.float64]
 
 _METADATA_FILE = "metadata.json"
 _CONFIG_FILE = "config.pkl"
+_LEADERBOARD_FILE = "leaderboard.csv"
+_PAYLOAD_DIR = "payload"
 _DEFAULT_TARGET_NAME = "target"
+
+#: Columns every leaderboard starts with, in order. Adapters may append their own after these.
+_LEADERBOARD_DTYPES: Mapping[str, str] = {
+    "model": "string",
+    "loss": "float64",
+    "metric": "string",
+    "is_best": "bool",
+}
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -88,6 +101,9 @@ class AutoMLRegressor[ConfigT: DataclassInstance](ABC):
         self.config = config
         self._feature_names: list[str] | None = None
         self._target_name: str = _DEFAULT_TARGET_NAME
+        self._candidates: pd.DataFrame | None = None
+        # Set by `load`: the unpacked archive, kept alive for as long as this object.
+        self._extracted: tempfile.TemporaryDirectory[str] | None = None
 
     # ------------------------------------------------------------------ public API
 
@@ -113,6 +129,9 @@ class AutoMLRegressor[ConfigT: DataclassInstance](ABC):
         self._target_name = _DEFAULT_TARGET_NAME if target.name is None else str(target.name)
         logger.info("Fitting %s on %d rows, %d features", type(self).__name__, *features.shape)
         self._fit(features, target)
+        # Captured now rather than at save time: pruning a search down to its winner destroys the
+        # record of the losers (AutoGluon's `clone_for_deployment` does exactly that).
+        self._candidates = _normalise_leaderboard(self._leaderboard())
         return self
 
     @final
@@ -159,16 +178,45 @@ class AutoMLRegressor[ConfigT: DataclassInstance](ABC):
         return _score(target.to_numpy(dtype=np.float64), predicted)
 
     @final
-    def save(self, path: Path) -> None:
-        """Write a self-contained model directory.
+    def leaderboard(self) -> pd.DataFrame:
+        """Report how every candidate model scored during the search.
 
-        The directory can be logged as-is with `mlflow.log_artifacts` or `wandb.Artifact.add_dir`.
+        Captured during `fit` and carried inside the file `save` writes, so it survives a `load`
+        even for frameworks that throw their search history away when the model is pruned.
+
+        Returns:
+            One row per candidate, best first. The first four columns are always ``model``,
+            ``loss``, ``metric`` and ``is_best``; adapters may append their own after them.
+            ``loss`` is the framework's own optimised metric and is lower-is-better: it ranks
+            candidates within one run, and is not comparable across frameworks. Empty for
+            adapters that do not search.
+
+        Raises:
+            NotFittedError: If called before `fit` or `load`.
+        """
+        self._require_fitted()
+        # A copy, so a caller reshaping the table cannot corrupt what `save` will write.
+        return _empty_leaderboard() if self._candidates is None else self._candidates.copy()
+
+    @final
+    def save(self, path: Path) -> None:
+        """Write the fitted model to a single file.
+
+        The file is a zip archive holding `metadata.json`, the pickled config, `leaderboard.csv`
+        and whatever the framework itself needs — one artifact to copy, upload or register. Only
+        the best model's weights go in; the losing candidates survive as leaderboard rows.
 
         Args:
-            path: Directory to write into; created if it does not exist.
+            path: File to write; parent directories are created, an existing file is replaced.
+
+        Raises:
+            IsADirectoryError: If ``path`` is an existing directory.
+            NotFittedError: If called before `fit` or `load`.
         """
         feature_names = self._require_fitted()
-        path.mkdir(parents=True, exist_ok=True)
+        if path.is_dir():
+            raise IsADirectoryError(f"{path} is a directory; save() writes a single file")
+        path.parent.mkdir(parents=True, exist_ok=True)
         model_metadata = _Metadata(
             adapter=type(self).__qualname__,
             library_version=metadata.version(self.distribution_name),
@@ -176,47 +224,73 @@ class AutoMLRegressor[ConfigT: DataclassInstance](ABC):
             target_name=self._target_name,
             params=dict(self.params),
         )
-        (path / _METADATA_FILE).write_text(json.dumps(model_metadata, indent=2))
-        # Pickle, not JSON, so config fields like `Path` or tuples round-trip with their real types.
-        (path / _CONFIG_FILE).write_bytes(pickle.dumps(self.config))
-        self._save(path)
+        with tempfile.TemporaryDirectory(prefix="automl-save-") as staging:
+            payload = Path(staging) / _PAYLOAD_DIR
+            payload.mkdir()
+            self._save(payload)
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(_METADATA_FILE, json.dumps(model_metadata, indent=2))
+                # Pickle, not JSON, so config fields like `Path` or tuples round-trip with their real types.
+                archive.writestr(_CONFIG_FILE, pickle.dumps(self.config))
+                archive.writestr(_LEADERBOARD_FILE, self.leaderboard().to_csv(index=False))
+                for file in sorted(payload.rglob("*")):
+                    if file.is_file():
+                        # Zip entries are posix paths on every platform.
+                        archive.write(file, Path(_PAYLOAD_DIR, file.relative_to(payload)).as_posix())
         logger.info("Saved %s to %s", type(self).__name__, path)
 
     @final
     @classmethod
     def load(cls, path: Path) -> Self:
-        """Restore a regressor written by `save`.
+        """Restore a regressor from a file written by `save`.
 
-        Only load directories you trust: the config and some frameworks use pickle.
+        The archive is unpacked into a temporary directory that lives as long as the returned
+        object: frameworks like AutoGluon read their model files lazily, so the files have to
+        outlive this call.
+
+        Only load files you trust: the config and some frameworks use pickle.
 
         Args:
-            path: Directory previously passed to `save`.
+            path: File previously passed to `save`.
 
         Returns:
             A fitted regressor ready to `predict`.
 
         Raises:
-            ValueError: If the directory was saved by a different adapter.
+            FileNotFoundError: If ``path`` does not exist.
+            ValueError: If the file was not written by `save`, or by a different adapter.
         """
-        model_metadata = cast(_Metadata, json.loads((path / _METADATA_FILE).read_text()))
-        if model_metadata["adapter"] != cls.__qualname__:
-            raise ValueError(f"{path} was saved by {model_metadata['adapter']}, not {cls.__qualname__}")
+        try:
+            with zipfile.ZipFile(path) as archive:
+                model_metadata = cast(_Metadata, json.loads(archive.read(_METADATA_FILE)))
+                if model_metadata["adapter"] != cls.__qualname__:
+                    raise ValueError(f"{path} was saved by {model_metadata['adapter']}, not {cls.__qualname__}")
 
-        installed_version = metadata.version(cls.distribution_name)
-        if model_metadata["library_version"] != installed_version:
-            logger.warning(
-                "%s was saved with %s %s but %s is installed",
-                path,
-                cls.distribution_name,
-                model_metadata["library_version"],
-                installed_version,
-            )
+                installed_version = metadata.version(cls.distribution_name)
+                if model_metadata["library_version"] != installed_version:
+                    logger.warning(
+                        "%s was saved with %s %s but %s is installed",
+                        path,
+                        cls.distribution_name,
+                        model_metadata["library_version"],
+                        installed_version,
+                    )
 
-        config = cast(ConfigT, pickle.loads((path / _CONFIG_FILE).read_bytes()))
-        regressor = cls(config)
-        regressor._feature_names = model_metadata["feature_names"]
-        regressor._target_name = model_metadata["target_name"]
-        regressor._load(path)
+                regressor = cls(cast(ConfigT, pickle.loads(archive.read(_CONFIG_FILE))))
+                regressor._feature_names = model_metadata["feature_names"]
+                regressor._target_name = model_metadata["target_name"]
+                # `float_precision="round_trip"`: the default CSV parser is a fast approximation that
+                # truncates to ~13 significant digits, so a loss would not survive the round trip.
+                leaderboard_csv = io.BytesIO(archive.read(_LEADERBOARD_FILE))
+                regressor._candidates = _normalise_leaderboard(
+                    pd.read_csv(leaderboard_csv, float_precision="round_trip")
+                )
+                regressor._extracted = tempfile.TemporaryDirectory(prefix="automl-model-")
+                archive.extractall(regressor._extracted.name)
+        except (zipfile.BadZipFile, KeyError) as error:
+            raise ValueError(f"{path} is not a model file written by save(): {error}") from error
+
+        regressor._load(Path(regressor._extracted.name) / _PAYLOAD_DIR)
         return regressor
 
     @property
@@ -247,12 +321,40 @@ class AutoMLRegressor[ConfigT: DataclassInstance](ABC):
     def _load(self, path: Path) -> None:
         """Restore framework state from ``path`` onto this freshly constructed instance."""
 
+    def _leaderboard(self) -> pd.DataFrame | None:
+        """Report the candidates `_fit` tried; optional, unlike the hooks above.
+
+        Returns:
+            A frame with at least the ``model``, ``loss`` (lower is better), ``metric`` and
+            ``is_best`` columns, plus any extras worth keeping. ``None`` for adapters that
+            train a single model and so have nothing to rank.
+        """
+        return None
+
     # ------------------------------------------------------------------ helpers
 
     def _require_fitted(self) -> list[str]:
         if self._feature_names is None:
             raise NotFittedError(f"{type(self).__name__} is not fitted; call fit() or load() first")
         return self._feature_names
+
+
+def _empty_leaderboard() -> pd.DataFrame:
+    return pd.DataFrame({name: pd.Series(dtype=dtype) for name, dtype in _LEADERBOARD_DTYPES.items()})
+
+
+def _normalise_leaderboard(frame: pd.DataFrame | None) -> pd.DataFrame:
+    """Put the guaranteed columns first with pinned dtypes, then sort the best candidate to the top."""
+    if frame is None:
+        return _empty_leaderboard()
+    missing = [column for column in _LEADERBOARD_DTYPES if column not in frame.columns]
+    if missing:
+        raise ValueError(f"Leaderboard is missing columns: {missing}")
+
+    extra = [column for column in frame.columns if column not in _LEADERBOARD_DTYPES]
+    ordered = frame[[*_LEADERBOARD_DTYPES, *extra]].astype(dict(_LEADERBOARD_DTYPES))
+    # Losses of `inf` (a learner that never completed) and NaN sort last, which is where they belong.
+    return ordered.sort_values("loss", ignore_index=True)
 
 
 def _check_features(features: pd.DataFrame) -> None:
