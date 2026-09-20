@@ -213,7 +213,8 @@ class ExperimentLogger[ConfigT: DataclassInstance](ABC):
             dst: Directory to download into; created if it does not exist.
 
         Returns:
-            The downloaded model directory, ready for `AutoMLRegressor.load`.
+            The downloaded model file, ready for `AutoMLRegressor.load`. A tracker that stores the
+            artifact inside a directory returns that directory instead.
         """
         dst.mkdir(parents=True, exist_ok=True)
         return self._download_model(version, dst)
