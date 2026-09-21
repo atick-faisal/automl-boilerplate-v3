@@ -218,10 +218,8 @@ def _autogluon() -> AnyRegressor:
     from automl_boilerplate_v3.autogluon_regressor import AutoGluonConfig, AutoGluonRegressor
 
     # Pinned to two fast families so the run is deterministic inside the time limit, and so the
-    # whole adapter contract below is exercised against a filtered search.
-    return AutoGluonRegressor(
-        AutoGluonConfig(time_limit_s=20, presets="medium_quality", included_model_types=("GBM", "XGB"))
-    )
+    # whole adapter contract below is exercised against a narrowed search.
+    return AutoGluonRegressor(AutoGluonConfig(time_limit_s=20, presets="medium_quality", model_types=("GBM", "XGB")))
 
 
 @pytest.fixture(scope="module", params=[_flaml, _autogluon], ids=["flaml", "autogluon"])
@@ -285,3 +283,27 @@ def test_adapter_can_be_saved_again_after_loading(
 
     twice = type(fitted).load(second)
     pd.testing.assert_series_equal(twice.predict(features), fitted.predict(features))
+
+
+# ------------------------------------------------- autogluon model selection
+
+
+def test_autogluon_trains_a_family_no_preset_carries(dataset: tuple[pd.DataFrame, pd.Series]) -> None:
+    """`model_types` names the models to train rather than filtering the preset's own list.
+
+    Regression test: while this went through AutoGluon's `included_model_types`, which only filters,
+    asking for a family no preset carries left nothing to train and the fit died with
+    "No models were trained successfully". "LR" is `sklearn.Ridge` here, so it is cheap to fit.
+    """
+    pytest.importorskip("autogluon.tabular")
+    from automl_boilerplate_v3.autogluon_regressor import AutoGluonConfig, AutoGluonRegressor
+
+    features, target = dataset
+    regressor = AutoGluonRegressor(AutoGluonConfig(time_limit_s=60, model_types=("LR",)))
+
+    board = regressor.fit(features, target).leaderboard()
+
+    # The weighted ensemble is stacked on regardless, so LinearModel is not the only row.
+    assert "LinearModel" in set(board["model"])
+    # Nothing from the preset's default list leaked in alongside it.
+    assert not {"NeuralNetTorch", "NeuralNetFastAI", "CatBoost", "XGBoost"} & set(board["model"])

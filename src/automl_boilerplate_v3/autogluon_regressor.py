@@ -8,7 +8,7 @@ from __future__ import annotations
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, override
+from typing import Literal, TypedDict, override
 
 import numpy as np
 import pandas as pd
@@ -22,10 +22,10 @@ _PREDICTOR_DIR = "predictor"
 # clashing with however the caller named their target.
 _LABEL = "__target__"
 
-#: Every model family AutoGluon can train for regression, spelled as `included_model_types`
-#: accepts it. Taken from `autogluon.tabular.registry.ag_model_registry`, minus the keys
-#: AutoGluon manages itself (the weighted ensembles, "DUMMY") and the multimodal ones
-#: ("AG_AUTOMM", "AG_IMAGE_NN", "AG_TEXT_NN"), which need installs this package does not pull in.
+#: Every model family AutoGluon can train for regression, spelled as `hyperparameters` accepts it.
+#: Taken from `autogluon.tabular.registry.ag_model_registry`, minus the keys AutoGluon manages
+#: itself (the weighted ensembles, "DUMMY") and the multimodal ones ("AG_AUTOMM", "AG_IMAGE_NN",
+#: "AG_TEXT_NN"), which need installs this package does not pull in.
 type AutoGluonModelType = Literal[
     # Gradient-boosted trees and forests: fast, and what the default presets lean on.
     "GBM",  # LightGBM
@@ -34,24 +34,27 @@ type AutoGluonModelType = Literal[
     "XGB",  # XGBoost
     "RF",  # Random forest
     "XT",  # Extremely randomised trees
-    # Simple baselines, cheap enough to always be worth a leaderboard row.
+    # Simple baselines, cheap enough to always be worth a leaderboard row. No preset trains these,
+    # so naming one here is the only way to get it.
     "KNN",  # k-nearest neighbours
-    "LR",  # Linear regression
-    # Neural networks: slower, and the ones that benefit most from a GPU.
+    "LR",  # Linear regression; `sklearn.Ridge` for a regression task
+    # Neural networks: slower, and the ones that benefit most from a GPU. Every one of these needs
+    # `torch` (and "FASTAI" also `fastai`), which this package's `autogluon` extra does not install.
     "NN_TORCH",  # AutoGluon's own PyTorch tabular network
     "FASTAI",  # fast.ai tabular network
     "REALMLP",  # RealMLP
     "TABM",  # TabM
     "FT_TRANSFORMER",  # FT-Transformer
-    # Interpretable models: you trade accuracy for a model you can read.
+    # Interpretable models: you trade accuracy for a model you can read. These need their own
+    # packages (`interpret`, `imodels`), which this package's `autogluon` extra does not install.
     "EBM",  # Explainable boosting machine
     "IM_RULEFIT",  # RuleFit
     "IM_FIGS",  # Fast interpretable greedy-tree sums
     "IM_GREEDYTREE",  # Greedy tree
     "IM_HSTREE",  # Hierarchical shrinkage tree
     "IM_BOOSTEDRULES",  # Boosted rule set
-    # Pretrained tabular foundation models: large downloads, and they want a GPU. Only the
-    # strongest presets reach for these, so naming one here is how you opt in deliberately.
+    # Pretrained tabular foundation models: large downloads, and they want a GPU. Each needs its own
+    # install on top of the `autogluon` extra, so naming one here is how you opt in deliberately.
     "TABPFN-2.6",
     "TABPFN-3",
     "TABPFNMIX",
@@ -64,6 +67,22 @@ type AutoGluonModelType = Literal[
     "NORI",
 ]
 
+#: The families this package's `autogluon` extra can actually run: GBM, CAT and XGB come from the
+#: extra's own lightgbm/catboost/xgboost, RF and XT from scikit-learn, which is a core dependency.
+#: AutoGluon's own default list adds "NN_TORCH" and "FASTAI", which have no torch to import here
+#: and so only cost a model slot and an ImportError in the log.
+_INSTALLABLE_MODEL_TYPES: tuple[AutoGluonModelType, ...] = ("GBM", "CAT", "XGB", "RF", "XT")
+
+
+class _ModelKwargs(TypedDict, total=False):
+    """The one `TabularPredictor.fit` argument this adapter passes only sometimes.
+
+    `total=False` is what makes "sometimes" expressible: an empty instance leaves the key off the
+    call entirely, which is not the same as passing ``None`` (see `AutoGluonRegressor._model_kwargs`).
+    """
+
+    hyperparameters: dict[str, dict[str, object]]
+
 
 @dataclass(frozen=True, slots=True)
 class AutoGluonConfig:
@@ -73,8 +92,11 @@ class AutoGluonConfig:
         time_limit_s: Wall-clock seconds for training; ``None`` means no limit.
         presets: Quality/speed trade-off, e.g. ``"medium_quality"``, ``"best_quality"``.
         eval_metric: Metric AutoGluon optimizes, e.g. ``"root_mean_squared_error"``.
-        included_model_types: Model families to train, e.g. ``("GBM", "CAT", "XGB")``;
-            `AutoGluonModelType` lists every option. ``None`` leaves the choice to ``presets``.
+        model_types: Model families to train, e.g. ``("GBM", "CAT", "XGB")``; `AutoGluonModelType`
+            lists every option. Defaults to the families this package installs. Naming families
+            here *replaces* the model list ``presets`` would have used, so it also forfeits that
+            preset's tuned hyperparameters; ``None`` leaves the whole choice to ``presets`` and is
+            the way to keep them.
         verbosity: AutoGluon log level from 0 (silent) to 4.
         work_dir: Where AutoGluon writes models while training. ``None`` uses a temporary
             directory that is removed with this object; call `save` to keep the model.
@@ -83,7 +105,7 @@ class AutoGluonConfig:
     time_limit_s: float | None = 300
     presets: str = "medium_quality"
     eval_metric: str = "root_mean_squared_error"
-    included_model_types: tuple[AutoGluonModelType, ...] | None = None
+    model_types: tuple[AutoGluonModelType, ...] | None = _INSTALLABLE_MODEL_TYPES
     verbosity: int = 0
     work_dir: Path | None = None
 
@@ -117,14 +139,31 @@ class AutoGluonRegressor(AutoMLRegressor[AutoGluonConfig]):
             # AutoGluon annotates `time_limit: float = None`; None (no limit) is its documented default.
             time_limit=self.config.time_limit_s,  # pyright: ignore[reportArgumentType]
             presets=self.config.presets,
-            # A filter over the preset's own model list, not a replacement for it, and the
-            # weighted ensemble is stacked on afterwards either way: a run restricted to
-            # ("GBM",) still finishes with a `WeightedEnsemble_L2` row in the leaderboard.
-            included_model_types=(
-                None if self.config.included_model_types is None else list(self.config.included_model_types)
-            ),
+            **self._model_kwargs(),
         )
         self._predictor = predictor
+
+    def _model_kwargs(self) -> _ModelKwargs:
+        """Spell `config.model_types` the way `TabularPredictor.fit` understands it.
+
+        `hyperparameters`, not `included_model_types`: the latter only *filters* the model list the
+        preset already chose (`autogluon/common/model_filter/_model_filter.py`), so asking it for a
+        family no preset carries — "LR", "KNN", any "IM_*" — leaves the list empty and the fit dies
+        with "No models were trained successfully". `hyperparameters` names the families outright,
+        and an explicit `fit` kwarg wins over the preset's own value
+        (`autogluon/common/utils/decorators.py`). A weighted ensemble is stacked on afterwards
+        either way: a run restricted to ("GBM",) still finishes with a `WeightedEnsemble_L2` row.
+
+        Returns:
+            The `hyperparameters` kwarg, or nothing at all when `presets` should decide. Empty
+            rather than ``{"hyperparameters": None}`` on purpose — AutoGluon fills in a preset's
+            values only for keys *absent* from the call, so passing ``None`` explicitly would stop
+            ``best_quality`` from ever applying its own `zeroshot` portfolio.
+        """
+        if self.config.model_types is None:
+            return _ModelKwargs()
+        # An empty dict per family means "this model, with its own default hyperparameters".
+        return _ModelKwargs(hyperparameters={name: {} for name in self.config.model_types})
 
     @override
     def _predict(self, features: pd.DataFrame) -> FloatArray:

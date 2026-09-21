@@ -76,16 +76,35 @@ and stacks an ensemble on top, so each config uses its own engine's vocabulary.
 
 ```python
 FlamlConfig(estimator_list=("lgbm", "catboost", "enet"))  # None lets FLAML choose
-AutoGluonConfig(included_model_types=("GBM", "CAT", "XGB"))  # None leaves it to `presets`
+AutoGluonConfig(model_types=("GBM", "CAT", "XGB"))  # None leaves it to `presets`
 ```
 
 Every valid name is listed, with a note on what it is, in the `FlamlEstimator` and
 `AutoGluonModelType` types next to each config — so your editor offers them and a typo is a
 type error rather than a wasted training run.
 
-One AutoGluon quirk worth knowing: `included_model_types` **filters** the preset's model list
-rather than replacing it, and the weighted ensemble is stacked on afterwards regardless. A run
-restricted to `("GBM",)` still ends with a `WeightedEnsemble_L2` row in the leaderboard.
+`AutoGluonConfig.model_types` defaults to `("GBM", "CAT", "XGB", "RF", "XT")` — the families the
+`autogluon` extra can actually run. AutoGluon's own default list also holds `NN_TORCH` and
+`FASTAI`, which have no torch to import here, so leaving them in would cost two model slots and an
+`ImportError` in the log on every run.
+
+Two AutoGluon details worth knowing:
+
+- Naming families **replaces** the model list the preset would have used, which means it also
+  forfeits that preset's tuned hyperparameters. `presets="best_quality"` with an explicit
+  `model_types` does not get the `zeroshot` portfolio — pass `model_types=None` to keep it. (For
+  the same reason a named family is trained with its own defaults, so `("GBM",)` is one LightGBM,
+  not the three variants the preset would have tried.)
+- The weighted ensemble is stacked on regardless, so a run restricted to `("GBM",)` still ends with
+  a `WeightedEnsemble_L2` row in the leaderboard.
+
+> **A torch log line you cannot turn off.** AutoGluon probes for CUDA while sizing resources — once
+> at startup and again for every model it trains — and with torch absent each probe logs *"Failed
+> to import torch or check CUDA availability!"* at `ERROR` level. AutoGluon maps `verbosity=0` to
+> exactly that level, so this is the one message that survives the adapter's silent default, and it
+> repeats roughly once per model. Training fewer models is the only lever that shortens it; no
+> model list removes it. Silencing it would mean the library editing your logging config, so it is
+> left alone.
 
 ### The saved model
 
