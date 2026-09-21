@@ -107,10 +107,10 @@ def train_and_register(*, engine: Engine, time_budget_s: float, tracking_uri: st
     x_train, x_val, y_train, y_val = _load_dataset()
     regressor = _build_regressor(engine, time_budget_s).fit(x_train, y_train)
 
-    tracker = MlflowLogger(
-        MlflowConfig(experiment_name=_EXPERIMENT, tracking_uri=tracking_uri, registry_uri=tracking_uri)
-    )
-    with tracker.start_run(f"{engine}-baseline", tags={"engine": engine, "dataset": _DATASET}) as run:
+    tracker = MlflowLogger(MlflowConfig(tracking_uri=tracking_uri, registry_uri=tracking_uri))
+    with tracker.start_run(
+        f"{engine}-baseline", experiment_name=_EXPERIMENT, tags={"engine": engine, "dataset": _DATASET}
+    ) as run:
         # The engine's own config, plus what it was trained on: enough to explain the run later.
         run.log_params(
             {

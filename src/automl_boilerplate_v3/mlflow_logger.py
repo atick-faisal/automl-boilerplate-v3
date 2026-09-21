@@ -21,17 +21,16 @@ from automl_boilerplate_v3.experiment_logger import ExperimentLogger, ModelVersi
 
 @dataclass(frozen=True, slots=True)
 class MlflowConfig:
-    """Where and under which experiment runs are tracked.
+    """Where runs are tracked. Which experiment they land in is named per run, in `start_run`.
 
     Attributes:
-        experiment_name: Experiment that runs are grouped under; created on first use.
         tracking_uri: Tracking server or store, e.g. ``"http://localhost:5000"``. ``None`` uses the
             ``MLFLOW_TRACKING_URI`` environment variable, then MLflow's default.
         registry_uri: Model registry location. ``None`` uses the tracking URI.
-        artifact_location: Artifact root for a newly created experiment; ignored if it already exists.
+        artifact_location: Artifact root for any experiment this logger creates; an experiment that
+            already exists keeps the root it was created with.
     """
 
-    experiment_name: str
     tracking_uri: str | None = None
     registry_uri: str | None = None
     artifact_location: str | None = None
@@ -47,8 +46,8 @@ class MlflowLogger(ExperimentLogger[MlflowConfig]):
         return MlflowClient(tracking_uri=self.config.tracking_uri, registry_uri=self.config.registry_uri)
 
     @override
-    def _start_run(self, run_name: str | None, tags: dict[str, str]) -> str:
-        run = self._client.create_run(self._experiment_id(), tags=tags, run_name=run_name)
+    def _start_run(self, experiment_name: str, run_name: str | None, tags: dict[str, str]) -> str:
+        run = self._client.create_run(self._experiment_id(experiment_name), tags=tags, run_name=run_name)
         return run.info.run_id
 
     @override
@@ -107,10 +106,8 @@ class MlflowLogger(ExperimentLogger[MlflowConfig]):
         )
         return Path(downloaded)
 
-    def _experiment_id(self) -> str:
-        experiment = self._client.get_experiment_by_name(self.config.experiment_name)
+    def _experiment_id(self, experiment_name: str) -> str:
+        experiment = self._client.get_experiment_by_name(experiment_name)
         if experiment is not None:
             return experiment.experiment_id
-        return self._client.create_experiment(
-            self.config.experiment_name, artifact_location=self.config.artifact_location
-        )
+        return self._client.create_experiment(experiment_name, artifact_location=self.config.artifact_location)

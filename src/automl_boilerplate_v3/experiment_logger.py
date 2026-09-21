@@ -44,10 +44,11 @@ class ModelVersion:
 class ExperimentLogger[ConfigT: DataclassInstance](ABC):
     """Base class every experiment tracking adapter extends.
 
-    A logger tracks at most one run at a time. Use it as a context manager so the run is always
+    A logger tracks at most one run at a time, but every run names its own experiment, so one
+    logger covers as many experiments as you like. Use it as a context manager so the run is always
     closed, and marked failed when the block raises::
 
-        with MlflowLogger(config).start_run("baseline") as run:
+        with MlflowLogger(config).start_run("baseline", experiment_name="housing") as run:
             run.log_params(regressor.params)
 
     Attributes:
@@ -61,11 +62,19 @@ class ExperimentLogger[ConfigT: DataclassInstance](ABC):
     # ------------------------------------------------------------------ run lifecycle
 
     @final
-    def start_run(self, run_name: str | None = None, tags: Mapping[str, str] | None = None) -> Self:
+    def start_run(
+        self,
+        run_name: str | None = None,
+        *,
+        experiment_name: str,
+        tags: Mapping[str, str] | None = None,
+    ) -> Self:
         """Open a new run that subsequent logging calls write to.
 
         Args:
             run_name: Human-readable run name; ``None`` lets the tracker pick one.
+            experiment_name: Experiment the run is grouped under; created on first use. Keyword-only
+                so a stale positional call fails loudly instead of naming an experiment after a run.
             tags: Free-form string labels attached to the run.
 
         Returns:
@@ -76,7 +85,7 @@ class ExperimentLogger[ConfigT: DataclassInstance](ABC):
         """
         if self._run_id is not None:
             raise RuntimeError(f"Run {self._run_id} is still active; call end_run() first")
-        self._run_id = self._start_run(run_name, dict(tags or {}))
+        self._run_id = self._start_run(experiment_name, run_name, dict(tags or {}))
         logger.info("Started run %s", self._run_id)
         return self
 
@@ -222,8 +231,8 @@ class ExperimentLogger[ConfigT: DataclassInstance](ABC):
     # ------------------------------------------------------------ adapter hooks
 
     @abstractmethod
-    def _start_run(self, run_name: str | None, tags: dict[str, str]) -> str:
-        """Create a run and return its identifier."""
+    def _start_run(self, experiment_name: str, run_name: str | None, tags: dict[str, str]) -> str:
+        """Create a run inside ``experiment_name`` and return its identifier."""
 
     @abstractmethod
     def _end_run(self, run_id: str, *, failed: bool) -> None:

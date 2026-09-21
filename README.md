@@ -43,9 +43,9 @@ features, target = fetch_california_housing(as_frame=True, return_X_y=True)
 x_train, x_val, y_train, y_val = train_test_split(features, target, random_state=0)
 
 regressor = FlamlRegressor(FlamlConfig(time_budget_s=5)).fit(x_train, y_train)
-logger = MlflowLogger(MlflowConfig(experiment_name="california-housing", tracking_uri="sqlite:///mlflow.db"))
+logger = MlflowLogger(MlflowConfig(tracking_uri="sqlite:///mlflow.db"))
 
-with logger.start_run("flaml-baseline") as run:
+with logger.start_run("flaml-baseline", experiment_name="california-housing") as run:
     run.log_params(regressor.params)
     run.log_metrics(regressor.validate(x_val, y_val).to_dict(prefix="val_"))
     run.log_table(regressor.leaderboard(), "leaderboard.csv")  # how every candidate scored
@@ -160,6 +160,8 @@ so it survives a `load` too.
 **`ExperimentLogger`**
 
 - One active run per logger. Used as a context manager, the run is marked `FAILED` if the block raises.
+- Each run names its own experiment in `start_run`, so one logger covers any number of experiments. The config
+  holds only where to connect.
 - Logging without an active run raises `RuntimeError` instead of silently creating one.
 - `log_table` uploads a dataframe as a CSV artifact, without the index.
 - `register_model` creates the registered model on first use and returns a `ModelVersion`.
