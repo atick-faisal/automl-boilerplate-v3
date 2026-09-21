@@ -307,3 +307,25 @@ def test_autogluon_trains_a_family_no_preset_carries(dataset: tuple[pd.DataFrame
     assert "LinearModel" in set(board["model"])
     # Nothing from the preset's default list leaked in alongside it.
     assert not {"NeuralNetTorch", "NeuralNetFastAI", "CatBoost", "XGBoost"} & set(board["model"])
+
+
+def test_autogluon_default_model_types_all_reach_the_leaderboard(
+    dataset: tuple[pd.DataFrame, pd.Series],
+) -> None:
+    """Every family in the default set survives training *and* being saved.
+
+    Regression test for a silent one: a model that fits and then raises while AutoGluon saves it is
+    dropped with only a log line, so it just goes missing from the leaderboard. XGBoost did exactly
+    that until the `xgboost` override in `pyproject.toml` — see the comment there for why.
+    """
+    pytest.importorskip("autogluon.tabular")
+    from automl_boilerplate_v3.autogluon_regressor import AutoGluonConfig, AutoGluonRegressor
+
+    # AutoGluon's leaderboard spells families out; the config names them by AutoGluon's own keys.
+    trained_names = {"GBM": "LightGBM", "CAT": "CatBoost", "XGB": "XGBoost", "RF": "RandomForest", "XT": "ExtraTrees"}
+    assert set(trained_names) == set(AutoGluonConfig().model_types or ()), "default set changed; update this map"
+
+    features, target = dataset
+    board = AutoGluonRegressor(AutoGluonConfig(time_limit_s=120)).fit(features, target).leaderboard()
+
+    assert set(trained_names.values()) <= set(board["model"])

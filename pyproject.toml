@@ -24,6 +24,15 @@ mlflow = [
     "mlflow-skinny>=3.16,<4",
 ]
 
+[tool.uv]
+# FLAML caps `xgboost<3.0.0`, which held the lock at xgboost 2.x. That xgboost's `save_model` reads
+# `_estimator_type`, which scikit-learn deprecated in 1.6 and removed in 1.9 — so AutoGluon trains
+# an XGBoost model and then dies saving it, and XGBoost silently vanishes from every leaderboard.
+# AutoGluon itself allows `>=2.1.1,<3.4`. FLAML's cap looks stale rather than real: this package is
+# regression-only, and its `xgboost` and `xgb_limitdepth` regression learners are verified working
+# on xgboost 3.3.0. Drop this override if the `flaml` extra goes away or upstream lifts the cap.
+override-dependencies = ["xgboost>=3,<3.4"]
+
 [build-system]
 requires = ["uv_build>=0.12.13,<0.13.0"]
 build-backend = "uv_build"
