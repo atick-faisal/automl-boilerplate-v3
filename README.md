@@ -21,7 +21,7 @@ uv sync --extra flaml            # or: --extra autogluon, --extra mlflow, --all-
 | ----------- | -------------------------------------------------- |
 | `flaml`     | `flaml[automl]`                                    |
 | `autogluon` | `autogluon-tabular` with CatBoost, LightGBM, XGBoost |
-| `mlflow`    | `mlflow-skinny` (tracking client only, no server)  |
+| `mlflow`    | `mlflow-skinny` (tracking client only, no server) and `psutil` |
 
 Importing `automl_boilerplate_v3` never imports a framework. Adapters live in their own modules and are imported
 explicitly.
@@ -42,13 +42,18 @@ from automl_boilerplate_v3.mlflow_logger import MlflowConfig, MlflowLogger
 features, target = fetch_california_housing(as_frame=True, return_X_y=True)
 x_train, x_val, y_train, y_val = train_test_split(features, target, random_state=0)
 
-regressor = FlamlRegressor(FlamlConfig(time_budget_s=5)).fit(x_train, y_train)
+regressor = FlamlRegressor(FlamlConfig(time_budget_s=5))
 logger = MlflowLogger(MlflowConfig(tracking_uri="sqlite:///mlflow.db"))
 
 with logger.start_run("flaml-baseline", experiment_name="california-housing") as run:
     run.log_params(regressor.params)
+
+    with run.monitor_system_metrics():  # CPU, memory, disk, network — and GPU, where there is one
+        regressor.fit(x_train, y_train)
+
+    run.log_candidates(regressor.leaderboard())  # one child run per candidate
     run.log_metrics(regressor.validate(x_val, y_val).to_dict(prefix="val_"))
-    run.log_table(regressor.leaderboard(), "leaderboard.csv")  # how every candidate scored
+    run.log_table(regressor.leaderboard(), "leaderboard.csv")  # the same table as one file
     regressor.save(Path("model.zip"))  # one file, best model only
     run.log_model(Path("model.zip"))
     version = run.register_model("california-housing")
@@ -56,6 +61,9 @@ with logger.start_run("flaml-baseline", experiment_name="california-housing") as
 restored = FlamlRegressor.load(logger.download_model(version, Path("downloads")))
 predictions = restored.predict(x_val)
 ```
+
+The search runs **inside** the run on purpose: that is what lets the machine be watched while it
+works, and what makes the run a group.
 
 A runnable version of the same workflow — with logging, a predictions table and a check that the
 registered model predicts exactly like the one in memory — lives in `examples/train_and_register.py`:
@@ -67,6 +75,55 @@ uv run python examples/train_and_register.py --engine autogluon --time-budget 12
 
 To use AutoGluon instead, swap the regressor for `AutoGluonRegressor(AutoGluonConfig(...))` from
 `automl_boilerplate_v3.autogluon_regressor`. Nothing else changes.
+
+### One run per search, one child run per model
+
+An AutoML search trains many models but is one experiment. `log_candidates` writes each row of
+`leaderboard()` as a child run of the active run, so the losing candidates become rows you can sort,
+filter and chart in the UI instead of a CSV you have to download first:
+
+```text
+flaml-baseline                     ← the parent: params, val_* metrics, model.zip, the registry version
+├── lgbm        loss 52.3  is_best True
+├── xgboost     loss 54.1  is_best False
+├── rf          loss 58.7  is_best False
+└── extra_tree  loss 59.9  is_best False
+```
+
+`model` names the child run; `metric` and `is_best` join it as params (so
+`params.is_best = 'True'` is a filter); `loss` and any other numeric column — AutoGluon's
+`fit_time_s`, `predict_time_s` — become metrics. Only the **winner** is worth an artifact, so the
+model file, the validation metrics and the registered version stay on the parent, which is where
+anyone opening the experiment starts.
+
+Two things worth knowing:
+
+- The children are written **after** the search, not while it runs. Streaming one per candidate
+  would need a per-model callback, and FLAML and AutoGluon spell that completely differently — the
+  numbers are the same either way, only the timestamps bunch up at the end.
+- A learner that never completed a trial has a loss of `inf` (FLAML reports it that way). That
+  value is skipped rather than logged, since trackers disagree about whether they can store one.
+
+`log_child_run` is the primitive underneath, for anything else worth grouping — a cross-validation
+fold, a seed sweep. It opens, writes and closes the child in one call, so the parent is still the
+active run when it returns.
+
+### Watching the machine during a search
+
+```python
+with run.monitor_system_metrics(sampling_interval_s=5.0):
+    regressor.fit(x_train, y_train)
+```
+
+Sampling runs on a background thread and always stops when the block exits, including when it
+raises. The metrics land on the active run under `system/`, and MLflow gives them their own tab.
+
+- GPU metrics appear when `pynvml` (NVIDIA) or `pyrsmi` (AMD) can be imported, and are skipped
+  silently otherwise. Neither is installed by the `mlflow` extra.
+- `MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL` in the environment **overrides** the argument. That is
+  MLflow's own precedence, not this package's.
+- A tracker whose adapter cannot sample logs a warning and lets the block run unmonitored, so this
+  never becomes the reason a training script fails.
 
 ### Choosing which models get trained
 
@@ -164,6 +221,9 @@ so it survives a `load` too.
   holds only where to connect.
 - Logging without an active run raises `RuntimeError` instead of silently creating one.
 - `log_table` uploads a dataframe as a CSV artifact, without the index.
+- `log_child_run` writes a finished run grouped under the active one, in the same experiment, and leaves the
+  parent active. `log_candidates` turns a leaderboard into one child run per candidate.
+- `monitor_system_metrics` records the machine for as long as its block runs, and always stops afterwards.
 - `register_model` creates the registered model on first use and returns a `ModelVersion`.
 - `download_model` doesn't need an active run.
 
@@ -182,10 +242,17 @@ adapter only implements the private hooks:
 Each adapter takes a frozen dataclass as its config. See `flaml_regressor.py` and `mlflow_logger.py` for short
 examples.
 
-`AutoMLRegressor._leaderboard` is the one **optional** hook: return a frame with `model`, `loss`, `metric` and
-`is_best` columns to have the base class normalise, sort and persist it. Adapters that train a single model can
-leave it alone. `_save` and `_load` still receive a directory — a temporary one the base class packs into the
-archive — so an adapter never deals with the file format itself.
+Each base class has one **optional** hook on top of those:
+
+- `AutoMLRegressor._leaderboard`: return a frame with `model`, `loss`, `metric` and `is_best` columns to have the
+  base class normalise, sort and persist it. Adapters that train a single model can leave it alone. `_save` and
+  `_load` still receive a directory — a temporary one the base class packs into the archive — so an adapter never
+  deals with the file format itself.
+- `ExperimentLogger._start_system_metrics`: start sampling the machine into a run and return the callable that
+  stops it, or leave it alone and `monitor_system_metrics` warns and runs the block unmonitored.
+
+`_start_run` takes a `parent_run_id`, which is how a tracker is asked to group runs. MLflow does it with a tag
+(`mlflow.parentRunId`); another tracker may have a first-class group. `None` means a top-level run.
 
 ## Project layout
 

@@ -22,7 +22,8 @@ def test_example_trains_logs_and_registers(tmp_path: Path) -> None:
     from mlflow import MlflowClient
 
     result = subprocess.run(
-        [sys.executable, str(_EXAMPLE), "--engine", "flaml", "--time-budget", "5"],
+        # A short sampling interval, so a 5 second search still leaves a system metric behind.
+        [sys.executable, str(_EXAMPLE), "--engine", "flaml", "--time-budget", "5", "--sampling-interval", "1"],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -44,3 +45,12 @@ def test_example_trains_logs_and_registers(tmp_path: Path) -> None:
     logged = [artifact.path for artifact in client.list_artifacts(run.info.run_id)]  # pyright: ignore[reportUnknownMemberType]
     assert "leaderboard.csv" in logged
     assert "model" in logged
+    assert [key for key in run.data.metrics if key.startswith("system/")], run.data.metrics
+
+    # The registered run is the parent of a group: every candidate FLAML tried hangs under it.
+    children = client.search_runs(
+        [run.info.experiment_id], filter_string=f"tags.`mlflow.parentRunId` = '{run.info.run_id}'"
+    )
+    assert children
+    assert {child.info.status for child in children} == {"FINISHED"}
+    assert sum(child.data.params["is_best"] == "True" for child in children) == 1

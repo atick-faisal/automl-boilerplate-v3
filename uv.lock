@@ -254,6 +254,7 @@ flaml = [
 ]
 mlflow = [
     { name = "mlflow-skinny" },
+    { name = "psutil" },
 ]
 
 [package.dev-dependencies]
@@ -272,6 +273,7 @@ requires-dist = [
     { name = "mlflow-skinny", marker = "extra == 'mlflow'", specifier = ">=3.16,<4" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pandas", specifier = ">=2.2" },
+    { name = "psutil", marker = "extra == 'mlflow'", specifier = ">=5.9" },
     { name = "scikit-learn", specifier = ">=1.5" },
 ]
 provides-extras = ["flaml", "autogluon", "mlflow"]

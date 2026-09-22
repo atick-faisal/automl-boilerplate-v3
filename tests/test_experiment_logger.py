@@ -7,6 +7,7 @@ against a throwaway SQLite store, which needs the full `mlflow` package from the
 from __future__ import annotations
 
 import io
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, override
@@ -30,8 +31,11 @@ class _NoConfig:
 @dataclass
 class _Run:
     experiment: str = ""
+    name: str | None = None
+    parent: str | None = None
     failed: bool | None = None
     params: dict[str, ParamValue] = field(default_factory=dict[str, ParamValue])
+    metrics: dict[str, float] = field(default_factory=dict[str, float])
     artifacts: dict[str, Path] = field(default_factory=dict[str, Path])
     contents: dict[str, str] = field(default_factory=dict[str, str])
 
@@ -44,9 +48,11 @@ class _RecordingLogger(ExperimentLogger[_NoConfig]):
         self.runs: dict[str, _Run] = {}
 
     @override
-    def _start_run(self, experiment_name: str, run_name: str | None, tags: dict[str, str]) -> str:
+    def _start_run(
+        self, experiment_name: str, run_name: str | None, tags: dict[str, str], *, parent_run_id: str | None
+    ) -> str:
         run_id = f"run-{len(self.runs)}"
-        self.runs[run_id] = _Run(experiment=experiment_name)
+        self.runs[run_id] = _Run(experiment=experiment_name, name=run_name, parent=parent_run_id)
         return run_id
 
     @override
@@ -59,7 +65,7 @@ class _RecordingLogger(ExperimentLogger[_NoConfig]):
 
     @override
     def _log_metrics(self, run_id: str, metrics: dict[str, float], step: int | None) -> None:
-        pass
+        self.runs[run_id].metrics.update(metrics)
 
     @override
     def _log_artifact(self, run_id: str, path: Path, name: str) -> None:
@@ -142,6 +148,70 @@ def test_log_table_stages_a_csv_under_the_given_name() -> None:
     pd.testing.assert_frame_equal(pd.read_csv(io.StringIO(csv)), table)
 
 
+def _leaderboard() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "model": ["lgbm", "rf", "sgd"],
+            "loss": [0.1, 0.25, float("inf")],
+            "metric": ["rmse", "rmse", "rmse"],
+            "is_best": [True, False, False],
+            "fit_time_s": [1.5, 2.0, 0.1],
+        }
+    )
+
+
+def test_log_child_run_groups_under_the_active_run() -> None:
+    with _RecordingLogger().start_run("parent", experiment_name="sweep") as logger:
+        parent_id = logger.run_id
+        child_id = logger.log_child_run("candidate", params={"model": "lgbm"}, metrics={"loss": 0.5})
+        # The child is closed but the parent is not: logging after it still writes to the parent.
+        assert logger.run_id == parent_id
+
+    assert logger.runs[child_id] == _Run(
+        experiment="sweep",
+        name="candidate",
+        parent=parent_id,
+        failed=False,
+        params={"model": "lgbm"},
+        metrics={"loss": 0.5},
+    )
+
+
+def test_log_child_run_without_active_run_raises() -> None:
+    with pytest.raises(RuntimeError, match="no active run"):
+        _RecordingLogger().log_child_run("candidate")
+
+
+def test_log_candidates_writes_one_child_run_per_row() -> None:
+    with _RecordingLogger().start_run("search", experiment_name="sweep") as logger:
+        parent_id = logger.run_id
+        logger.log_candidates(_leaderboard())
+
+    children = [run for run_id, run in logger.runs.items() if run_id != parent_id]
+    assert [run.name for run in children] == ["lgbm", "rf", "sgd"]
+    assert [run.parent for run in children] == [parent_id] * 3
+    assert children[0].params == {"model": "lgbm", "metric": "rmse", "is_best": "True"}
+    assert children[0].metrics == {"loss": 0.1, "fit_time_s": 1.5}
+    # An `inf` loss is dropped: FLAML reports it for a learner that never completed a trial.
+    assert children[2].metrics == {"fit_time_s": 0.1}
+
+
+def test_log_candidates_rejects_an_incomplete_leaderboard() -> None:
+    with (
+        _RecordingLogger().start_run(experiment_name="sweep") as logger,
+        pytest.raises(ValueError, match="missing columns"),
+    ):
+        logger.log_candidates(pd.DataFrame({"model": ["lgbm"], "loss": [0.1]}))
+
+
+def test_monitor_system_metrics_warns_and_carries_on_without_a_hook(caplog: pytest.LogCaptureFixture) -> None:
+    with _RecordingLogger().start_run(experiment_name="exp") as logger, logger.monitor_system_metrics():
+        logger.log_params({"a": 1})
+
+    assert "does not record system metrics" in caplog.text
+    assert logger.runs["run-0"].params == {"a": 1}
+
+
 # -------------------------------------------------------------------- mlflow
 
 
@@ -218,3 +288,37 @@ def test_mlflow_one_logger_writes_to_two_experiments(mlflow_logger: MlflowLogger
     experiment_ids = [client.get_run(run_id).info.experiment_id for run_id in (first_run_id, second_run_id)]
     assert experiment_ids[0] != experiment_ids[1]
     assert [client.get_experiment(experiment_id).name for experiment_id in experiment_ids] == ["baseline", "sweep"]
+
+
+def test_mlflow_log_candidates_creates_child_runs(mlflow_logger: MlflowLogger) -> None:
+    with mlflow_logger.start_run("search", experiment_name="test") as run:
+        run.log_candidates(_leaderboard())
+        parent_run_id = run.run_id
+
+    client = mlflow_logger._client  # pyright: ignore[reportPrivateUsage]
+    parent = client.get_run(parent_run_id)
+    children = client.search_runs(
+        [parent.info.experiment_id], filter_string=f"tags.`mlflow.parentRunId` = '{parent_run_id}'"
+    )
+
+    assert sorted(str(child.info.run_name) for child in children) == ["lgbm", "rf", "sgd"]
+    assert {child.info.status for child in children} == {"FINISHED"}
+    best = next(child for child in children if child.data.params["is_best"] == "True")
+    assert best.data.metrics == {"loss": 0.1, "fit_time_s": 1.5}
+
+
+def test_mlflow_records_system_metrics_while_the_block_runs(
+    mlflow_logger: MlflowLogger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("psutil")
+    # The environment variable wins over the argument, so a developer who exports it would
+    # otherwise be waiting for their own sampling interval here.
+    monkeypatch.delenv("MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL", raising=False)
+
+    with mlflow_logger.start_run("monitored", experiment_name="test") as run:
+        with run.monitor_system_metrics(sampling_interval_s=0.1):
+            time.sleep(0.5)
+        run_id = run.run_id
+
+    metrics = mlflow_logger._client.get_run(run_id).data.metrics  # pyright: ignore[reportPrivateUsage]
+    assert [key for key in metrics if key.startswith("system/")], metrics

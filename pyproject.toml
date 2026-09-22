@@ -22,6 +22,9 @@ autogluon = [
 ]
 mlflow = [
     "mlflow-skinny>=3.16,<4",
+    # `mlflow-skinny` ships the system metrics monitor but not what it samples with, so
+    # `monitor_system_metrics` would fail on import without this.
+    "psutil>=5.9",
 ]
 
 [tool.uv]

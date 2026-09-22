@@ -6,6 +6,7 @@
     uv run python examples/train_and_register.py
     uv run python examples/train_and_register.py --engine autogluon --time-budget 120
     uv run python examples/train_and_register.py --tracking-uri http://localhost:5000
+    uv run python examples/train_and_register.py --sampling-interval 2
 
 Browse the result with ``uv run mlflow ui --backend-store-uri sqlite:///mlflow.db``.
 """
@@ -39,6 +40,7 @@ type AnyRegressor = AutoMLRegressor[Any]
 # exists behind a database. SQLite needs the full `mlflow` package, which the dev group installs.
 _DEFAULT_TRACKING_URI = "sqlite:///mlflow.db"
 _DEFAULT_TIME_BUDGET_S = 30.0
+_DEFAULT_SAMPLING_INTERVAL_S = 5.0
 _EXPERIMENT = "diabetes-regression"
 _MODEL_NAME = "diabetes-regressor"
 _DATASET = "diabetes"
@@ -93,19 +95,26 @@ def _predictions_table(actual: pd.Series, predicted: pd.Series) -> pd.DataFrame:
     return table.rename_axis("sample").reset_index()
 
 
-def train_and_register(*, engine: Engine, time_budget_s: float, tracking_uri: str) -> ModelVersion:
+def train_and_register(
+    *, engine: Engine, time_budget_s: float, tracking_uri: str, sampling_interval_s: float
+) -> ModelVersion:
     """Search for a model, log everything worth keeping, and register the winner.
+
+    The search itself happens *inside* the run, which is what lets the machine be watched while it
+    works, and what makes the run a group: every candidate the search tried becomes a child run
+    under it, while the winner's model and metrics stay on the parent.
 
     Args:
         engine: Which AutoML framework to drive.
         time_budget_s: Wall-clock seconds the search may take.
         tracking_uri: MLflow tracking and registry store.
+        sampling_interval_s: Seconds between system metric samples during the search.
 
     Returns:
         The registry version just created.
     """
     x_train, x_val, y_train, y_val = _load_dataset()
-    regressor = _build_regressor(engine, time_budget_s).fit(x_train, y_train)
+    regressor = _build_regressor(engine, time_budget_s)
 
     tracker = MlflowLogger(MlflowConfig(tracking_uri=tracking_uri, registry_uri=tracking_uri))
     with tracker.start_run(
@@ -123,10 +132,17 @@ def train_and_register(*, engine: Engine, time_budget_s: float, tracking_uri: st
                 "split_seed": _SPLIT_SEED,
             }
         )
+        # CPU, memory, disk and network for as long as the search runs — and GPU where there is one.
+        with run.monitor_system_metrics(sampling_interval_s=sampling_interval_s):
+            regressor.fit(x_train, y_train)
+
+        # One child run per candidate, so the losers can be sorted and charted, not just downloaded.
+        run.log_candidates(regressor.leaderboard())
         # Training scores next to validation scores: the gap between them is the overfitting.
         run.log_metrics(regressor.validate(x_train, y_train).to_dict(prefix="train_"))
         validation = regressor.validate(x_val, y_val)
         run.log_metrics(validation.to_dict(prefix="val_"))
+        # The same table as one file, for reading without the UI.
         run.log_table(regressor.leaderboard(), "leaderboard.csv")
         run.log_table(_predictions_table(y_val, regressor.predict(x_val)), "predictions/validation.csv")
 
@@ -184,12 +200,22 @@ def main() -> None:
         default=_DEFAULT_TRACKING_URI,
         help="MLflow tracking and registry store (default: %(default)s)",
     )
+    parser.add_argument(
+        "--sampling-interval",
+        type=float,
+        default=_DEFAULT_SAMPLING_INTERVAL_S,
+        metavar="SECONDS",
+        help="Seconds between system metric samples during the search (default: %(default)s)",
+    )
     args = parser.parse_args()
 
     # INFO, so the library's own progress lines appear next to this script's.
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     version = train_and_register(
-        engine=cast(Engine, args.engine), time_budget_s=args.time_budget, tracking_uri=args.tracking_uri
+        engine=cast(Engine, args.engine),
+        time_budget_s=args.time_budget,
+        tracking_uri=args.tracking_uri,
+        sampling_interval_s=args.sampling_interval,
     )
     logger.info("Registered %s version %s, ready for inference", version.name, version.version)
 

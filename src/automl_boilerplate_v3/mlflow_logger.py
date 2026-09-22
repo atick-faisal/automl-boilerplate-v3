@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path, PurePosixPath
@@ -14,6 +15,7 @@ from mlflow import MlflowClient
 from mlflow.artifacts import download_artifacts
 from mlflow.entities import Metric, Param, RunStatus
 from mlflow.exceptions import MlflowException
+from mlflow.utils.mlflow_tags import MLFLOW_PARENT_RUN_ID
 
 from automl_boilerplate_v3.base import ParamValue
 from automl_boilerplate_v3.experiment_logger import ExperimentLogger, ModelVersion
@@ -46,9 +48,36 @@ class MlflowLogger(ExperimentLogger[MlflowConfig]):
         return MlflowClient(tracking_uri=self.config.tracking_uri, registry_uri=self.config.registry_uri)
 
     @override
-    def _start_run(self, experiment_name: str, run_name: str | None, tags: dict[str, str]) -> str:
+    def _start_run(
+        self, experiment_name: str, run_name: str | None, tags: dict[str, str], *, parent_run_id: str | None
+    ) -> str:
+        if parent_run_id is not None:
+            # A tag is all a nested run is: MLflow groups by `mlflow.parentRunId` and has no other
+            # notion of a run group. The UI shows the children folded under the parent.
+            tags = {**tags, MLFLOW_PARENT_RUN_ID: parent_run_id}
         run = self._client.create_run(self._experiment_id(experiment_name), tags=tags, run_name=run_name)
         return run.info.run_id
+
+    @override
+    def _start_system_metrics(self, run_id: str, sampling_interval_s: float) -> Callable[[], None] | None:
+        """Sample CPU, memory, disk, network — and GPU, where one is visible — into the run."""
+        # Imported here rather than at module scope: the monitor imports `psutil` eagerly, and the
+        # rest of this adapter has to keep working for anyone who installed `mlflow-skinny` alone.
+        from mlflow.system_metrics.system_metrics_monitor import SystemMetricsMonitor
+
+        # `MLFLOW_SYSTEM_METRICS_SAMPLING_INTERVAL` in the environment overrides the argument, which
+        # is MLflow's own precedence, not ours. GPU metrics appear when `pynvml` (NVIDIA) or
+        # `pyrsmi` (AMD) imports, and are skipped silently otherwise.
+        monitor = SystemMetricsMonitor(
+            run_id,
+            # MLflow leaves `sampling_interval` unannotated and defaults it to `10`, so it reads as
+            # an int. It is only ever passed to `threading.Event.wait`, which takes a float.
+            sampling_interval=sampling_interval_s,  # pyright: ignore[reportArgumentType]
+            tracking_uri=self.config.tracking_uri,
+        )
+        monitor.start()
+        # `finish` stops the thread and flushes what it has buffered.
+        return monitor.finish
 
     @override
     def _end_run(self, run_id: str, *, failed: bool) -> None:
