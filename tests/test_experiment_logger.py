@@ -291,6 +291,22 @@ def test_mlflow_downloads_latest_version_by_name(mlflow_logger: MlflowLogger, tm
     assert downloaded.read_bytes() == b"second"
 
 
+def test_mlflow_download_fetches_only_the_model(mlflow_logger: MlflowLogger, tmp_path: Path) -> None:
+    model_file = tmp_path / "model.zip"
+    model_file.write_bytes(b"model")
+    with mlflow_logger.start_run(experiment_name="test") as run:
+        run.log_table(_leaderboard(), "leaderboard.csv")
+        run.log_model(model_file)
+        run.register_model("price-regressor")
+
+    destination = tmp_path / "download"
+    downloaded = mlflow_logger.download_model(ModelVersion("price-regressor", "latest"), destination)
+
+    # The run's other artifacts stay on the server; only the registered model comes down.
+    assert list(destination.iterdir()) == [downloaded]
+    assert downloaded.is_file()
+
+
 def test_mlflow_latest_of_model_without_versions_fails_clearly(mlflow_logger: MlflowLogger, tmp_path: Path) -> None:
     from mlflow.exceptions import MlflowException
 
