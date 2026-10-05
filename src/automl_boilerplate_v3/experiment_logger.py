@@ -392,7 +392,7 @@ class ExperimentLogger[ConfigT: DataclassInstance](ABC):
 
     @abstractmethod
     def _register_model(self, run_id: str, model_name: str, artifact_name: str) -> ModelVersion:
-        """Register the run's ``artifact_name`` directory as a new version of ``model_name``."""
+        """Register the run's ``artifact_name`` as a new version of ``model_name``; fail if it is missing."""
 
     @abstractmethod
     def _download_model(self, version: ModelVersion, dst: Path) -> Path:

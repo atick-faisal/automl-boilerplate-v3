@@ -307,6 +307,33 @@ def test_mlflow_download_fetches_only_the_model(mlflow_logger: MlflowLogger, tmp
     assert downloaded.is_file()
 
 
+def test_mlflow_registers_a_model_logged_in_a_subfolder(mlflow_logger: MlflowLogger, tmp_path: Path) -> None:
+    model_file = tmp_path / "model.zip"
+    model_file.write_bytes(b"model")
+    with mlflow_logger.start_run(experiment_name="test") as run:
+        run.log_model(model_file, "models/best.zip")
+        version = run.register_model("price-regressor", artifact_name="models/best.zip")
+
+    assert mlflow_logger.download_model(version, tmp_path / "download").read_bytes() == b"model"
+
+
+@pytest.mark.parametrize("artifact_name", ["other", ""])
+def test_mlflow_register_rejects_an_artifact_the_run_lacks(
+    mlflow_logger: MlflowLogger, tmp_path: Path, artifact_name: str
+) -> None:
+    from mlflow.exceptions import MlflowException
+
+    model_file = tmp_path / "model.zip"
+    model_file.write_bytes(b"model")
+    with mlflow_logger.start_run(experiment_name="test") as run:
+        run.log_model(model_file)
+        with pytest.raises(MlflowException, match=rf"no artifact '{artifact_name}' to register; it has \['model'\]"):
+            run.register_model("price-regressor", artifact_name=artifact_name)
+
+    # Rejected before anything reached the registry, so no empty registered model is left behind.
+    assert mlflow_logger._client.search_registered_models() == []  # pyright: ignore[reportPrivateUsage]
+
+
 def test_mlflow_latest_of_model_without_versions_fails_clearly(mlflow_logger: MlflowLogger, tmp_path: Path) -> None:
     from mlflow.exceptions import MlflowException
 

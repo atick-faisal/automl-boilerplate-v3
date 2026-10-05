@@ -120,6 +120,7 @@ class MlflowLogger(ExperimentLogger[MlflowConfig]):
 
     @override
     def _register_model(self, run_id: str, model_name: str, artifact_name: str) -> ModelVersion:
+        self._require_artifact(run_id, artifact_name)
         try:
             self._client.create_registered_model(model_name)
         except MlflowException as error:
@@ -130,6 +131,22 @@ class MlflowLogger(ExperimentLogger[MlflowConfig]):
         )
         # MLflow 3 returns the version as an int despite annotating it as str.
         return ModelVersion(name=model_name, version=str(model_version.version))
+
+    def _require_artifact(self, run_id: str, artifact_name: str) -> None:
+        """Fail now if the run has no ``artifact_name``, rather than when someone downloads it."""
+        # MLflow registers any source without checking it exists, so a name that differs from the
+        # one given to `log_model` only surfaces at download time, as "Failed to download artifacts".
+        # An empty name is caught too: it would register the whole run, every artifact included.
+        wanted = PurePosixPath(artifact_name)
+        folder = None if wanted.parent == PurePosixPath() else str(wanted.parent)
+        # `MlflowClient.list_artifacts` leaves `path` unannotated.
+        listing = self._client.list_artifacts(run_id, folder)  # pyright: ignore[reportUnknownMemberType]
+        present = [info.path for info in listing]
+        if str(wanted) not in present:
+            raise MlflowException(
+                f"Run {run_id} has no artifact {artifact_name!r} to register; it has {present}. "
+                "Pass the name given to log_model as artifact_name."
+            )
 
     @override
     def _download_model(self, version: ModelVersion, dst: Path) -> Path:

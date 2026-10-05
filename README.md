@@ -224,7 +224,7 @@ so it survives a `load` too.
 - `log_child_run` writes a finished run grouped under the active one, in the same experiment, and leaves the
   parent active. `log_candidates` turns a leaderboard into one child run per candidate.
 - `monitor_system_metrics` records the machine for as long as its block runs, and always stops afterwards.
-- `register_model` creates the registered model on first use and returns a `ModelVersion`.
+- `register_model` creates the registered model on first use and returns a `ModelVersion`. It refuses an `artifact_name` the run doesn't have, so a name that differs from the one given to `log_model` fails at training time, not at download time.
 - `download_model` doesn't need an active run. Pass `ModelVersion(name, "latest")` to fetch the newest version
   when you only know the model's name.
 
