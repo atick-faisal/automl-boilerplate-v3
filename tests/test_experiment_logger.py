@@ -278,6 +278,27 @@ def test_mlflow_model_register_download_round_trip(mlflow_logger: MlflowLogger, 
     assert downloaded.read_bytes() == b"PK\x03\x04 pretend archive"
 
 
+@pytest.mark.parametrize("label", ["latest", "LATEST"])
+def test_mlflow_downloads_latest_version_by_name(mlflow_logger: MlflowLogger, tmp_path: Path, label: str) -> None:
+    for contents in (b"first", b"second"):
+        model_file = tmp_path / "model.zip"
+        model_file.write_bytes(contents)
+        with mlflow_logger.start_run(experiment_name="test") as run:
+            run.log_model(model_file)
+            run.register_model("price-regressor")
+
+    downloaded = mlflow_logger.download_model(ModelVersion("price-regressor", label), tmp_path / "download")
+    assert downloaded.read_bytes() == b"second"
+
+
+def test_mlflow_latest_of_model_without_versions_fails_clearly(mlflow_logger: MlflowLogger, tmp_path: Path) -> None:
+    from mlflow.exceptions import MlflowException
+
+    mlflow_logger._client.create_registered_model("empty")  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(MlflowException, match="'empty' has no versions"):
+        mlflow_logger.download_model(ModelVersion("empty", "latest"), tmp_path / "download")
+
+
 def test_mlflow_one_logger_writes_to_two_experiments(mlflow_logger: MlflowLogger) -> None:
     with mlflow_logger.start_run("first", experiment_name="baseline") as run:
         first_run_id = run.run_id

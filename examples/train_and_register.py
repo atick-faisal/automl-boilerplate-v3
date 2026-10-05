@@ -166,7 +166,8 @@ def _check_registry_round_trip(
     """Download the registered version and prove it predicts exactly like the model in memory.
 
     This is what registering a model has to buy you: another process can fetch the version, load
-    it and predict, without the code that trained it.
+    it and predict, without the code that trained it. It fetches ``"latest"`` rather than the exact
+    version, because a serving process usually knows the model's name and nothing else.
 
     Args:
         tracker: Logger holding the registry; no run has to be active.
@@ -175,7 +176,7 @@ def _check_registry_round_trip(
         features: Rows to compare predictions on.
     """
     with tempfile.TemporaryDirectory(prefix="example-download-") as downloads:
-        model_file = tracker.download_model(version, Path(downloads))
+        model_file = tracker.download_model(ModelVersion(version.name, "latest"), Path(downloads))
         # `load` is a classmethod: whichever adapter trained the model also loads it back.
         restored = type(regressor).load(model_file)
         difference = float((restored.predict(features) - regressor.predict(features)).abs().max())

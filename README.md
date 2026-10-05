@@ -225,7 +225,8 @@ so it survives a `load` too.
   parent active. `log_candidates` turns a leaderboard into one child run per candidate.
 - `monitor_system_metrics` records the machine for as long as its block runs, and always stops afterwards.
 - `register_model` creates the registered model on first use and returns a `ModelVersion`.
-- `download_model` doesn't need an active run.
+- `download_model` doesn't need an active run. Pass `ModelVersion(name, "latest")` to fetch the newest version
+  when you only know the model's name.
 
 > **Security:** `AutoMLRegressor.load` unpacks an archive and uses pickle. Only load model files you trust.
 

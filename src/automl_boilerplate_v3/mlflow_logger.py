@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import tempfile
 import time
@@ -19,6 +20,11 @@ from mlflow.utils.mlflow_tags import MLFLOW_PARENT_RUN_ID
 
 from automl_boilerplate_v3.base import ParamValue
 from automl_boilerplate_v3.experiment_logger import ExperimentLogger, ModelVersion
+
+logger = logging.getLogger(__name__)
+
+#: Version label that `download_model` resolves to the newest version, like MLflow's `models:/` URIs.
+_LATEST = "latest"
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,11 +135,28 @@ class MlflowLogger(ExperimentLogger[MlflowConfig]):
     def _download_model(self, version: ModelVersion, dst: Path) -> Path:
         # Resolve through our client: `download_artifacts("models:/...")` ignores `registry_uri`
         # and silently queries MLflow's default store instead.
-        source_uri = self._client.get_model_version_download_uri(version.name, version.version)
+        source_uri = self._client.get_model_version_download_uri(version.name, self._resolve_version(version))
         downloaded = download_artifacts(
             artifact_uri=source_uri, dst_path=str(dst), tracking_uri=self.config.tracking_uri
         )
         return Path(downloaded)
+
+    def _resolve_version(self, version: ModelVersion) -> str:
+        """Turn ``"latest"`` into the newest version number; pass any other label through."""
+        if version.version.lower() != _LATEST:
+            return version.version
+        # Only `models:/name/latest` URIs understand "latest" — every registry store calls `int()`
+        # on the version it is handed — and those URIs are resolved against the global registry,
+        # not ours (see `_download_model`). MLflow's own resolver also uses `get_latest_versions`,
+        # deprecated since 2.9 along with stages, so look the newest version up directly.
+        newest = self._client.search_model_versions(
+            f"name='{version.name}'", order_by=["version_number DESC"], max_results=1
+        )
+        if not newest:
+            raise MlflowException(f"Registered model {version.name!r} has no versions to download")
+        resolved = str(newest[0].version)
+        logger.info("Resolved %s version %r to %s", version.name, version.version, resolved)
+        return resolved
 
     def _experiment_id(self, experiment_name: str) -> str:
         experiment = self._client.get_experiment_by_name(experiment_name)

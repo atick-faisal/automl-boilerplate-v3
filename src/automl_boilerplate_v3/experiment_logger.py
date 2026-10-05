@@ -45,6 +45,7 @@ class ModelVersion:
     Attributes:
         name: Registered model name.
         version: Tracker-specific version label. A string because not every tracker numbers them.
+            ``"latest"`` names the newest version when downloading.
     """
 
     name: str
@@ -350,7 +351,8 @@ class ExperimentLogger[ConfigT: DataclassInstance](ABC):
         """Fetch a registered model version; does not need an active run.
 
         Args:
-            version: Version returned by `register_model` or built by hand.
+            version: Version returned by `register_model` or built by hand, e.g.
+                ``ModelVersion("my-model", "latest")`` for the newest one.
             dst: Directory to download into; created if it does not exist.
 
         Returns:
@@ -394,7 +396,10 @@ class ExperimentLogger[ConfigT: DataclassInstance](ABC):
 
     @abstractmethod
     def _download_model(self, version: ModelVersion, dst: Path) -> Path:
-        """Download ``version`` into the existing directory ``dst`` and return the model directory."""
+        """Download ``version`` into the existing directory ``dst`` and return the model file.
+
+        ``version.version`` may be ``"latest"``, which the adapter resolves to the newest version.
+        """
 
     def _start_system_metrics(self, run_id: str, sampling_interval_s: float) -> Callable[[], None] | None:
         """Start sampling machine metrics into ``run_id``; optional, unlike the hooks above.
